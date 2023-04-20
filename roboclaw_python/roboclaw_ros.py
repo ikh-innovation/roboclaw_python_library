@@ -115,22 +115,17 @@ class Node:
         self._publish_roboclaw_temperature = rospy.get_param("~publish_temperature", True)
         self._publish_roboclaw_status = rospy.get_param("~publish_status", True)
         self._publish_currents = rospy.get_param("~publish_currents", True)
-        rate = rospy.get_param("~rate",20.0)
+        rate = rospy.get_param("~rate",10.0)
+        publish_rate = rospy.get_param("~publish_rate",5.0)
         # Timers
-        self.timer_update_rate = rospy.Duration(1.0/rate)
-        rospy.Timer(self.timer_update_rate, self._read_data_callback)
-
-    def _read_data_callback(self, timer):
-        
-        # Read and append currents to the current instance
-        m1_current, m2_current = self.read_currents()
-        self.motorCurrents.appendM1(m1_current)
-        self.motorCurrents.appendM2(m2_current)
-        
+        self.period = rospy.Duration().from_sec(1/publish_rate)
+        self.timer_update_rate = rospy.Duration().from_sec(1.0/rate)
+        self.timer1 = rospy.Timer(self.timer_update_rate, self._read_data_callback)
+    
+    def _publish_callback(self,timer):
         # Publish Mean Current Messages
-        mean_currents = self.motorCurrents.getMeanM1M2Values()
-        
         if (self._publish_currents):
+            mean_currents = self.motorCurrents.getMeanM1M2Values()
             msg = FloatStamped()
             msg.header.stamp = rospy.Time.now()
             msg.data = mean_currents[0]
@@ -138,11 +133,6 @@ class Node:
             msg.data = mean_currents[1]
             self.m2_current_pub.publish(msg)
         
-        # Calculate Output power
-        sum_of_means = mean_currents[0]+mean_currents[1]
-        sum_of_means /= 100
-        self.outputpower = sum_of_means*sum_of_means
-
         # Read and publish Errors
         if (self._publish_roboclaw_status):
             self.publish_list_of_errors(self.read_list_of_errors())
@@ -150,6 +140,25 @@ class Node:
         # Read and publish Temp
         if (self._publish_roboclaw_temperature):
             self.publish_temperature(self.read_temps()/10)
+                
+
+    def _read_data_callback(self, timer):
+        # Read and append currents to the current instance
+        m1_current, m2_current = self.read_currents()
+        self.motorCurrents.appendM1(m1_current)
+        self.motorCurrents.appendM2(m2_current)
+        
+        # get mean of motors current values
+        mean_currents = self.motorCurrents.getMeanM1M2Values()
+        
+        # Calculate Output power
+        sum_of_means = mean_currents[0]+mean_currents[1]
+        sum_of_means /= 100
+        self.outputpower = sum_of_means*sum_of_means
+        
+        
+
+        
 
     def open_roboclaw_port(self):
         rospy.loginfo('Roboclaw Node: Try to open port...')
@@ -202,7 +211,11 @@ class Node:
 
     def run(self):
         rospy.loginfo("Starting motor drive")
-        rospy.spin()
+        import time
+        time.sleep(1)
+        timer2 = rospy.Timer(self.period, self._publish_callback)
+        while(not rospy.is_shutdown()):
+            rospy.sleep(1)
 
     def read_list_of_errors(self):
         try:
@@ -294,7 +307,6 @@ class Node:
 if __name__ == "__main__":
     try:
         node = Node()
-        node.roboclaw_control(0)
         node.run()
     except rospy.ROSInterruptException:
         pass

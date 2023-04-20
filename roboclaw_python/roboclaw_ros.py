@@ -6,46 +6,56 @@ from std_srvs.srv import SetBool
 from std_msgs.msg import String
 import numpy as np
 
-class MotorCurrents :
+
+class MotorCurrents:
     def __init__(self):
         self._bufferSize = 10
         self.m1 = np.array([0.0 for i in range(self._bufferSize)])
         self.m2 = np.array([0.0 for i in range(self._bufferSize)])
-    
+        self.prevMeans = [0.0, 0.0]
+
     def setBufferSize(self, size):
-        
+
         if (self._bufferSize == size):
             pass
         elif (self._bufferSize > size):
             self._bufferSize = size
             np.insert(self.m1, 0, np.zeros(self._bufferSize - self.m1.size))
-            np.insert(self.m2, 0, np.zeros(self._bufferSize - self.m2.size))           
-        else :
+            np.insert(self.m2, 0, np.zeros(self._bufferSize - self.m2.size))
+        else:
             self._bufferSize = size
             self.m1 = self.m1[self.m1.size-self._bufferSize:self.m1.size]
             self.m2 = self.m2[self.m2.size-self._bufferSize:self.m2.size]
-            
-    def appendM1(self,value):
-        self.m1 = np.append(self.m1,value)
-        self.m1 = np.delete(self.m1,0)
-        
-    def appendM2(self,value):
-        self.m2= np.append(self.m2,value)
-        self.m2 = np.delete(self.m2,0)
-        
+
+    def appendM1(self, value):
+        self.m1 = np.append(self.m1, value)
+        self.m1 = np.delete(self.m1, 0)
+
+    def appendM2(self, value):
+        self.m2 = np.append(self.m2, value)
+        self.m2 = np.delete(self.m2, 0)
+
     def getMeanM1M2Values(self):
-        return [np.mean(self.m1),np.mean(self.m2)]
-    
+        return [np.mean(self.m1), np.mean(self.m2)]
+
+    def getMeanM1M2Derivatives(self, dt):
+        now = self.getMeanM1M2Values()
+        res = self.getDerivatives(now, self.prevMeans, dt)
+        self.prevMeans = now
+        return res
+
+    def getDerivatives(self, now, prev, dt):
+        return (np.array(now)-np.array(prev))/dt
+
     def getMaxOfMeans(self):
         return np.max(self.getMeanM1M2Values())
-    
+
     def getM1(self):
         return self.m1
-    
+
     def getM2(self):
         return self.m2
-        
-        
+
 
 class Node:
     def __init__(self):
@@ -55,17 +65,22 @@ class Node:
         self.dev_name = rospy.get_param("~dev", "/dev/ttyACM0")
         self.baud_rate = int(rospy.get_param("~baud", "115200"))
         self.address = int(rospy.get_param("~address", "128"))
-        
+
         # Parameter to indicate that the motors are running.
         self.is_running = False
-        
+
         # Check port permissions
         if (self.port_permissions(self.dev_name)):
             rospy.loginfo("Port permissions are acceptable.")
         else:
-            rospy.logerr("Port permissions are not valid. (sudo chmod 777 [port name])")
-            exit(-1)
-        
+            rospy.logwarn(
+                "Port permissions are not valid. (sudo chmod 777 [port name])")
+            rospy.logwarn("Try to give permissions...")
+            if (not self.give_port_permissions(self.dev_name)):
+                rospy.logerr("cannot achieved")
+                exit(-1)
+            rospy.loginfo("Permissions are now ok!")
+
         # Create a roboclaw instance
         self.roboclaw = Roboclaw(self.dev_name, self.baud_rate)
 
@@ -73,47 +88,71 @@ class Node:
         self.open_roboclaw_port()
 
         # Topics
-        self.m1_current_pub = rospy.Publisher('m1_current', FloatStamped, queue_size=10)
-        self.m2_current_pub = rospy.Publisher('m2_current', FloatStamped, queue_size=10)
-        self.deck_position_pub = rospy.Publisher('deck_position', String, queue_size=10,latch=True)
-        self.m1_current_mean_pub = rospy.Publisher('m1_current_mean', FloatStamped, queue_size=10)
-        self.m2_current_mean_pub = rospy.Publisher('m2_current_mean', FloatStamped, queue_size=10)
-        
+        self.m1_current_pub = rospy.Publisher(
+            'm1_current', FloatStamped, queue_size=10)
+        self.m2_current_pub = rospy.Publisher(
+            'm2_current', FloatStamped, queue_size=10)
+        self.deck_position_pub = rospy.Publisher(
+            'deck_position', String, queue_size=10, latch=True)
+        self.status_pub = rospy.Publisher('status', String, queue_size=10)
+        self.temp_pub = rospy.Publisher('temperature', FloatStamped, queue_size=10)
+
         self.current_msg = FloatStamped()
-        
+
         # Motor Currents Class
         self.motorCurrents = MotorCurrents()
-        
+
         # Services
-        self.deck_control_srv = rospy.Service('move_prismatic', SetBool, self.deck_control_cb)
+        self.deck_control_srv = rospy.Service(
+            'move_prismatic', SetBool, self.deck_control_cb)
+
+        self.outputpower = 0.0
+        self._power_stop_threshold = 0.3
+        self._stop_move_timeout = 20
+        self._pwm_duty_cicle = 65
+        self._max_cnt_to_stop = 5
+        self._publish_roboclaw_temperature = True
+        self._publish_roboclaw_status = True
+        self._publish_currents = True
         
+
         # Timers
-        timer_update_rate = rospy.Duration(1.0/20.0)
-        rospy.Timer(timer_update_rate, self._read_data_callback)
+        self.timer_update_rate = rospy.Duration(1.0/20.0)
+        rospy.Timer(self.timer_update_rate, self._read_data_callback)
 
         rospy.sleep(1)
+
+    def _read_data_callback(self, timer):
         
-    def _read_data_callback(self,timer):
-        _none, m1_current, m2_current = self.roboclaw.ReadCurrents(self.address)
+        # Read and append currents to the current instance
+        m1_current, m2_current = self.read_currents()
         self.motorCurrents.appendM1(m1_current)
         self.motorCurrents.appendM2(m2_current)
-        # Publish Raw Current Messages
-        msg = FloatStamped()
-        msg.header.stamp = rospy.Time.now()
         
         # Publish Mean Current Messages
         mean_currents = self.motorCurrents.getMeanM1M2Values()
-        msg.data = mean_currents[0]
-        self.m1_current_pub.publish(msg)
-        msg.data = mean_currents[1]
-        self.m2_current_pub.publish(msg)
         
-        # Get Temperature
-        print("Error: ",self.read_errors())
-        print("Temp: ",self.read_temps())
+        if (self._publish_currents):
+            msg = FloatStamped()
+            msg.header.stamp = rospy.Time.now()
+            msg.data = mean_currents[0]
+            self.m1_current_pub.publish(msg)
+            msg.data = mean_currents[1]
+            self.m2_current_pub.publish(msg)
         
+        # Calculate Output power
+        sum_of_means = mean_currents[0]+mean_currents[1]
+        sum_of_means /= 100
+        self.outputpower = sum_of_means*sum_of_means
 
-    
+        # Read and publish Errors
+        if (self._publish_roboclaw_status):
+            self.publish_list_of_errors(self.read_list_of_errors())
+        
+        # Read and publish Temp
+        if (self._publish_roboclaw_temperature):
+            self.publish_temperature(self.read_temps()/10)
+
     def open_roboclaw_port(self):
         rospy.loginfo('Roboclaw Node: Try to open port...')
         try:
@@ -121,7 +160,6 @@ class Node:
         except Exception as e:
             rospy.logfatal("Could not connect to Roboclaw")
             rospy.logdebug(e)
-            # rospy.signal_shutdown("Could not connect to Roboclaw")
         rospy.loginfo("Roboclaw Node: Try to read version...")
         try:
             version = self.roboclaw.ReadVersion(self.address)
@@ -129,97 +167,133 @@ class Node:
             rospy.logwarn("Problem getting roboclaw version")
             rospy.logdebug(e)
             pass
-        
+
         if not version[0]:
             rospy.logwarn("Could not get version from roboclaw")
         else:
             rospy.logdebug(repr(version[1]))
 
-    
-    def port_permissions(self,port):
-        try :
+    def port_permissions(self, port):
+        try:
             import os
-            if(os.access(port,os.R_OK) and os.access(port,os.W_OK) and os.access(port, os.X_OK)):
+            if (os.access(port, os.R_OK) and os.access(port, os.W_OK) and os.access(port, os.X_OK)):
                 return True
             else:
                 return False
         except:
             rospy.logerror('Roboclaw: Cannot read port permissions')
-        
-        
+
+    def give_port_permissions(self, port):
+        import os
+        if os.path.exists(port):
+            os.system('echo INnovation! | sudo -S chmod 777 '+port)
+            return True
+        else:
+            return False
+
+    def publish_list_of_errors(self, lst):
+        msg = String()
+        msg.data = str(lst)
+        self.status_pub.publish(msg)
+    
+    def publish_temperature(self, temp):
+        msg = FloatStamped()
+        msg.header.stamp = rospy.Time.now()
+        msg.data = temp
+        self.temp_pub.publish(msg)
+
     def run(self):
         rospy.loginfo("Starting motor drive")
-        #rospy.spin()
-        r_time = rospy.Rate(10)
-        while not rospy.is_shutdown():
-            r_time.sleep()
-            
-    
-    def read_errors(self):
+        rospy.spin()
+        #r_time = rospy.Rate(10)
+        #while not rospy.is_shutdown():
+        #    r_time.sleep()
+
+    def read_list_of_errors(self):
         try:
-            err1, err2 = self.roboclaw.ReadError(self.address)
-            return err2
+            
+            return self.roboclaw.ReadErrorDecoded(self.address)
         except:
             raise Exception("Cannot read roboclaw errors")
-    
+
     def read_temps(self):
         try:
             temp1, temp2 = self.roboclaw.ReadTemp(self.address)
             return temp2
         except:
-            raise Exception("Cannot read roboclaw errors") 
-        
-    def deck_control_cb(self,req):
-        
+            raise Exception("Cannot read roboclaw errors")
+    
+    def read_currents(self):
+        try:
+            _none, m1_current, m2_current = self.roboclaw.ReadCurrents(
+            self.address)
+            return (m1_current, m2_current)
+        except:
+            raise Exception("Cannot read roboclaw motor currents")
+
+    def deck_control_cb(self, req):
         res = (False, "Nothing")
         if req.data:
             res = self.roboclaw_control(1)
         else:
             res = self.roboclaw_control(0)
         return res
-    
-    def roboclaw_control(self,cmd):
+
+    def send_zero_commands(self):
+        self.is_running = False
+        self.roboclaw.ForwardM1(self.address, 0)
+        self.roboclaw.ForwardM2(self.address, 0)
+
+    def update_deck_state(self, cmd):
+        msg = String()
+        if (cmd):
+            msg.data = "down"
+            self.deck_position_pub.publish(msg)
+        else:
+            msg.data = "up"
+            self.deck_position_pub.publish(msg)
+
+    def roboclaw_control(self, cmd):
         time_stared = rospy.Time.now().to_sec()
-        vel = 85
         if (not self.is_running):
             if (cmd):
-                rospy.loginfo("Forward!")
+                rospy.logwarn("- Deck goes to lower position")
                 self.is_running = True
-                self.roboclaw.BackwardM1(self.address, int(vel*1.055))
-                self.roboclaw.BackwardM2(self.address, vel)
+                self.roboclaw.BackwardM1(
+                    self.address, int(self._pwm_duty_cicle*1.055))
+                self.roboclaw.BackwardM2(self.address, self._pwm_duty_cicle)
             else:
-                rospy.loginfo("Backword")
+                rospy.logwarn("- Deck goes to upper position")
                 self.is_running = True
-                self.roboclaw.ForwardM1(self.address, int(vel*1.055))
-                self.roboclaw.ForwardM2(self.address, vel)
-        else: 
-            return (False, "An other command is executed") 
-        while(not rospy.is_shutdown()):
-            # print("=====================")
-            # print("Max Value: ",self.motorCurrents.getMaxOfMeans())
-            # print("Cmd: ",cmd)
+                self.roboclaw.ForwardM1(
+                    self.address, int(self._pwm_duty_cicle*1.055))
+                self.roboclaw.ForwardM2(self.address, self._pwm_duty_cicle)
+        else:
+            return (False, "An other command is executed")
+
+        cnt = 0
+
+        while (not rospy.is_shutdown()):
+
             duration = rospy.Time.now().to_sec()-time_stared
-            # print("Duration: ",duration)
-            if (duration>25):
-                self.is_running = False
-                return (False, "Timeout reached!")
-            elif ((25>duration>3) and (self.motorCurrents.getMaxOfMeans()<-9)):
-                self.roboclaw.ForwardM1(self.address, 0)
-                self.roboclaw.ForwardM2(self.address, 0)
-                msg=String()
-                if (cmd):
-                    msg.data = "up"
-                    self.deck_position_pub.publish(msg)
-                else:
-                    msg.data = "down"
-                    self.deck_position_pub.publish(msg)
-                self.is_running = False
-                return (True, "Position Reached")       
-            rospy.sleep(0.2)
-                
-                
             
-        
+            # if timeout excited then stop motors and return false with the related message
+            if (duration > self._stop_move_timeout):
+                self.send_zero_commands()
+                return (False, "Timeout reached!")
+            
+            # if duration > 2 secs and the total output power is lower than threshold the motor stops
+            elif ((duration > 2) and (self.outputpower < self._power_stop_threshold)):
+                cnt += 1
+                if (cnt > self._max_cnt_to_stop):
+                    rospy.sleep(1)
+                    # stop motors
+                    self.send_zero_commands()
+                    # update state
+                    self.update_deck_state(cmd)
+                    return (True, "Position Reached")
+                
+            rospy.sleep(self.timer_update_rate.to_sec())
 
 
 if __name__ == "__main__":

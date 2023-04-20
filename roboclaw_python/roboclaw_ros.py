@@ -120,8 +120,6 @@ class Node:
         self.timer_update_rate = rospy.Duration(1.0/rate)
         rospy.Timer(self.timer_update_rate, self._read_data_callback)
 
-        rospy.sleep(1)
-
     def _read_data_callback(self, timer):
         
         # Read and append currents to the current instance
@@ -205,9 +203,6 @@ class Node:
     def run(self):
         rospy.loginfo("Starting motor drive")
         rospy.spin()
-        #r_time = rospy.Rate(10)
-        #while not rospy.is_shutdown():
-        #    r_time.sleep()
 
     def read_list_of_errors(self):
         try:
@@ -299,6 +294,7 @@ class Node:
 if __name__ == "__main__":
     try:
         node = Node()
+        node.roboclaw_control(0)
         node.run()
     except rospy.ROSInterruptException:
         pass

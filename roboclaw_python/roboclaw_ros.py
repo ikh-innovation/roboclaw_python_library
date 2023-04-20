@@ -107,17 +107,17 @@ class Node:
             'move_prismatic', SetBool, self.deck_control_cb)
 
         self.outputpower = 0.0
-        self._power_stop_threshold = 0.3
-        self._stop_move_timeout = 20
-        self._pwm_duty_cicle = 65
-        self._max_cnt_to_stop = 5
-        self._publish_roboclaw_temperature = True
-        self._publish_roboclaw_status = True
-        self._publish_currents = True
-        
-
+        # params
+        self._power_stop_threshold = rospy.get_param("~power_stop_threshold", 0.3) #0.3
+        self._stop_move_timeout = rospy.get_param("~stop_move_timeout", 20) #20
+        self._pwm_duty_cicle = rospy.get_param("~pwm_duty_cycle", 65) #65
+        self._max_cnt_to_stop = rospy.get_param("~max_counter_stop", 5) #5
+        self._publish_roboclaw_temperature = rospy.get_param("~publish_temperature", True)
+        self._publish_roboclaw_status = rospy.get_param("~publish_status", True)
+        self._publish_currents = rospy.get_param("~publish_currents", True)
+        rate = rospy.get_param("~rate",20.0)
         # Timers
-        self.timer_update_rate = rospy.Duration(1.0/20.0)
+        self.timer_update_rate = rospy.Duration(1.0/rate)
         rospy.Timer(self.timer_update_rate, self._read_data_callback)
 
         rospy.sleep(1)
@@ -269,7 +269,7 @@ class Node:
                     self.address, int(self._pwm_duty_cicle*1.055))
                 self.roboclaw.ForwardM2(self.address, self._pwm_duty_cicle)
         else:
-            return (False, "An other command is executed")
+            return (False, "An other command is ongoing! Try later.")
 
         cnt = 0
 

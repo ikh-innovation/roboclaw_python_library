@@ -109,8 +109,9 @@ class Node:
         self.m2_current_pub.publish(msg)
         
         # Get Temperature
-        temp1, temp2 = self.roboclaw.ReadTemp(self.address)
-        err1, err2 = self.roboclaw.ReadError(self.address)
+        print("Error: ",self.read_errors())
+        print("Temp: ",self.read_temps())
+        
 
     
     def open_roboclaw_port(self):
@@ -152,8 +153,22 @@ class Node:
         r_time = rospy.Rate(10)
         while not rospy.is_shutdown():
             r_time.sleep()
-
-
+            
+    
+    def read_errors(self):
+        try:
+            err1, err2 = self.roboclaw.ReadError(self.address)
+            return err2
+        except:
+            raise Exception("Cannot read roboclaw errors")
+    
+    def read_temps(self):
+        try:
+            temp1, temp2 = self.roboclaw.ReadTemp(self.address)
+            return temp2
+        except:
+            raise Exception("Cannot read roboclaw errors") 
+        
     def deck_control_cb(self,req):
         
         res = (False, "Nothing")
